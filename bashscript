@@ -1,0 +1,918 @@
+#!/bin/sh
+
+#This script is used to run the Prod testing steps
+#keep this in sync with Prodrun.sh and script.sh
+#-------------------------------------------------------------------------------------
+# 25-APRIL-2017 CDUTTA  TESTING AUTOMATION
+#
+#-------------------------------------------------------------------------------------
+# Set up Oracle
+export ORACLE_HOME=/opt/oracle/product/11.2.0.3/client
+export ORACLE_SERVICE=d_cpbdev
+
+
+# Set up Openmake
+export CLEAR_HOME=/opt/clearcase/7.1.2/clearcase
+OM_HOME=/sys_apps/openmake/7.2/client
+export TOOL_BIN=/usr/cpb/tools/bin
+export vobs=/vob/cpb_core_dev/source
+export vobi=/vob/cpb_core_dev/include
+CHNG_MGT_HOME=/usr/cmg/bin
+
+# Set up Path
+export PATH=/opt/oracle/product/11.2.0.3/client/bin:$PATH
+export TNS_ADMIN=$ORACLE_HOME/network/admin
+export COBDIR=/opt/microfocus/cobol
+export JAVA_HOME=/usr/java6
+export LIBPATH=${JAVA_HOME}/jre/lib/ppc:$LIBPATH
+export PATH=${JAVA_HOME}/bin:$PATH
+export PATH=.:$PATH
+export PATH=~/bin:$PATH
+export PATH=/usr/cmg/bin:$PATH
+export PATH=${COBDIR}/bin:$PATH
+export PATH=${JAVA_HOME}/bin:$PATH
+export PATH=/usr/vacpp/bin:$PATH
+export PATH=${OM_HOME}/bin:$PATH
+export PATH=${CLEAR_HOME}/bin:$PATH
+export PATH=${CHNG_MGT_HOME}/bin:$PATH
+export PATH=${ORACLE_HOME}/bin:$PATH
+export PATH=${TOOL_BIN}:$PATH
+export PATH=${CLEAR_HOME}/bin:$PATH
+export LIBPATH=$COBLIB:$LIBPATH
+export LIBPATH=${ORACLE_HOME}/lib32:$LIBPATH
+
+ORACLE_SERVICE=d_cpbdev
+export ORACLE_SERVICE
+
+LOCATION=`pwd`
+echo "The location is :"$LOCATION
+
+pwd
+
+home=/home/$USER
+
+tail -r $LOCATION/posting.txt>$LOCATION/a_posting.txt
+
+let a=1
+let at=1
+let o1=1
+let o2=2
+
+while IFS=: read -r REG LOC STEP SQL
+do
+        printf 'CPB REGION : %s, TEST LOCATION: %s\n' "$REG" "$LOC"
+        if [ "$a" = "$o2" ] ; then
+                REGION="$REG"
+                CUSTSQL="$SQL"
+        fi
+        a=`expr $a + 1`
+done<$LOCATION/runinfo.txt
+
+CIW_USER=ciw$REGION
+CPB_USER=CPB$REGION
+export CIW_USER
+export CPB_USER
+
+###################################################
+#DB PASSWORD AFTER CYBERARK PROJECT
+###################################################
+DB_INFO=`/usr/cpb/$CPB_USER/bin/get_dbuser_info.ksh`
+DB_ID=`echo $DB_INFO | cut -d "," -f1`
+DB_PASSWD=`echo $DB_INFO | cut -d "," -f2`
+
+###################################################
+# CHECKING CUSTOMISED SQL
+###################################################
+if [ "$CUSTSQL" = ' ' -o  ! -f "$home"/"$CUSTSQL".sql ] ; then
+        CHECKSQL="N"
+else
+        CHECKSQL="Y"
+fi
+
+if [ "$(echo "$LOCATION"| rev | cut -c -1 | rev)" == "/" ] ; then
+        LOCATION=$(echo "$LOCATION" | rev | cut -c 2- | rev)
+
+fi
+
+Error_Para()
+{
+
+        bold=$(tput bold)
+        normal=$(tput sgr0)
+
+        echo  "${bold}Errored Out Due to $1 ${bold}${normal}\n"
+
+        echo "******************************************************"
+        echo "******************************************************"
+        echo "${bold}**********  ********   ********    ********   ********"
+        echo "**          **     **  **     **  **      **  **     **"
+        echo "**          **     **  **     **  **      **  **     **"
+        echo "******      ********   ********   **      **  ********"
+        echo "**          **   **    **   **    **      **  **   **"
+        echo "**          **    **   **    **   **      **  **    **"
+        echo "**********  **     **  **     **   ********   **     **${bold}${normal}"
+        echo "******************************************************"
+        echo "******************************************************"
+
+        exit
+
+}
+
+Write_log_info()
+{
+
+        echo "*****************************************************************"
+        echo "RESULT OF LOG: $1"
+        grep -e POSTED: -e SKIPPED: -e 'READ IN:' $1
+        echo "*****************************************************************"
+}
+
+Create_Account_list()
+{
+
+        if [ ! -f "$LOCATION"/act.lst ] ; then
+
+                echo "select account_nbr from card_account_v order by 1;\n quit">"$LOCATION"/find_query.sql
+               $ORACLE_HOME/bin/sqlplus -s $DB_ID/$DB_PASSWD@$ORACLE_SERVICE @"$LOCATION"/find_query.sql | sed '/6011/!
+d'>"$LOCATION"/act.lst
+        fi
+
+TOTAL_ACCOUNTS=`wc -l < "$LOCATION"/act.lst | sed 's/ *//g'`
+}
+
+echo "\n::TEST CODE TESTING STEPS\n">>TestSteps.txt
+
+#set Region:
+
+. /usr/cpb/tools/bin/cpbset_2019 $CPB_USER
+echo "::Debug Region set: $CPB_USER">>TestSteps.txt
+
+Sql_exec()
+{
+        $ORACLE_HOME/bin/sqlplus -s $DB_ID/$DB_PASSWD@$ORACLE_SERVICE @ciwfile<"$LOCATION"/sqlfile.txt
+}
+
+Sql_exec_AT()
+{
+        $ORACLE_HOME/bin/sqlplus -s $DB_ID/$DB_PASSWD@$ORACLE_SERVICE @ciwfile<"$LOCATION"/sqlfile1.txt
+}
+
+Purge_Load_exec()
+{
+        echo "Y" > Y.txt
+        purge_accounts < Y.txt
+        rc=$?
+        if [ $rc -gt '0' ] ; then
+                Error_Para Purge_Account_Failed
+        else
+                echo "::Accounts Purged">>TestSteps.txt
+        fi
+        rm Y.txt
+
+        if [ $POSTING = "NEW_ACCOUNTS" ] ; then
+                echo "No need to load before dumps for New Accounts"
+        else
+                load_accounts -f bfr.*.acx
+#                /usr/cpb/tools/bin/load_accounts -f bfr.*.acx
+                rc=$?
+                if [ $rc -gt '0' ] ; then
+                        Error_Para Load_acx_Failed
+                else
+                        echo "::Accounts Loaded">>TestSteps.txt
+                fi
+        fi
+
+        Create_Account_list
+
+        echo "$acct_nbr" > "$LOCATION"/sqlfile.txt
+        echo "$CIW_USER" >> "$LOCATION"/sqlfile.txt
+
+}
+
+Delete_batch_exec()
+{
+cpdinf func=delete_batch
+}
+
+Cycle_exec()
+{
+
+        Delete_batch_exec
+
+        rm min.sql max.sql
+        minquery="set heading off;\nselect min(acct_key) from card_Account_v where account_nbr in ("
+        maxquery="set heading off;\nselect max(acct_key) from card_Account_v where account_nbr in ("
+        let i=1
+        c=`wc -l < act.lst | sed 's/ *//g'`
+                while read LINE
+                 do
+                        actnbrs=`echo $LINE`
+                        minquery="$minquery $actnbrs"
+                        maxquery="$maxquery $actnbrs"
+                        if [ $i -ne $c ] ; then
+                                minquery="$minquery , "
+                                maxquery="$maxquery , "
+                        else
+                                minquery="$minquery );\nquit;"
+                                maxquery="$maxquery );\nquit;"
+                        fi
+                        i=`expr $i + 1`
+                done<act.lst
+                echo $minquery>min.sql
+                echo $maxquery>max.sql
+                minval=`$ORACLE_HOME/bin/sqlplus -s $DB_ID/$DB_PASSWD@$ORACLE_SERVICE @min | tr -d '\040\011\012\015'`
+                maxval=`$ORACLE_HOME/bin/sqlplus -s $DB_ID/$DB_PASSWD@$ORACLE_SERVICE @max | tr -d '\040\011\012\015'`
+                rm min.sql max.sql
+                echo "$BSPCycleScript UNIT=1 START_ACCT="$minval" END_ACCT="$maxval""
+
+                $CPB_BIN/$BSPCycleScript UNIT=1 START_ACCT="$minval" END_ACCT="$maxval" > "$LOCATION"/"$EXEC".$cycletype
+"$step".bsp.log 2>&1
+                if [ $rc -gt '0' ] ; then
+                        Error_Para Cycling_Posting_Issue
+                else
+                        echo "::        CYCLING BSP POSTED">>TestSteps.txt
+                fi
+
+                Write_log_info "$LOCATION"/"$EXEC".$cycletype"$step".bsp.log
+
+                echo "************"$EXEC" $cycletype BSP LOG ************\n" | tr '[:lower:]' '[:upper:]'>>file.txt
+                cat "$LOCATION"/"$EXEC".$cycletype"$step".bsp.log>>file.txt
+
+
+        echo "\nCIW DUMPS:">>filehead.txt
+
+        while read LINE
+           do
+           acct_nbr=`echo $LINE`
+           echo "$acct_nbr" > sqlfile.txt
+           echo "$CIW_USER" >> sqlfile.txt
+           Sql_exec
+           mv $LOCATION/ciwdump."$acct_nbr" "$LOCATION"/"$EXEC".$cycletype"$step".ciwdump."$acct_nbr".lst
+           echo "AFTER TEST $cycletype: "$LOCATION"/"$EXEC".$cycletype"$step".ciwdump."$acct_nbr".lst">>filehead.txt
+        done<act.lst
+
+        echo "ACCOUNT DUMPS:">>filehead.txt
+
+        if [ $TOTAL_ACCOUNTS -gt "1" ] ; then
+                dumpaccounts -c d_cpbdev -f act.lst -o "$LOCATION"/"$EXEC".$cycletype"$step".accdump.bulk.acx
+#/usr/cpb/tools/bin/dumpaccounts -c d_cpbdev -f act.lst -o "$LOCATION"/"$EXEC".$cycletype"$step".accdump.bulk.acx
+                if [ $rc -gt '0' ] ; then
+                        Error_Para Dump_Accounts_Issue
+                else
+                        echo "::        ACX ACCOUNT DUMP STORED">>TestSteps.txt
+                fi
+                echo "AFTER TEST $cycletype: "$LOCATION"/"$EXEC".$cycletype"$step".accdump.bulk.acx">>filehead.txt
+        else
+               dumpaccounts -c d_cpbdev -f act.lst -o "$LOCATION"/"$EXEC".$cycletype"$step".accdump."$acct_nbr".acx
+
+#/usr/cpb/tools/bin/dumpaccounts -c d_cpbdev -f act.lst -o "$LOCATION"/"$EXEC".$cycletype"$step".accdump."$acct_nbr".acx
+                if [ $rc -gt '0' ] ; then
+                        Error_Para Dump_Accounts_Issue
+                else
+                        echo "::        ACX ACCOUNT DUMP STORED">>TestSteps.txt
+                fi
+                echo "AFTER TEST $cycletype: "$LOCATION"/"$EXEC".$cycletype"$step".accdump."$acct_nbr".acx">>filehead.txt
+        fi
+
+        echo "  ">>filehead.txt
+        cp "$EXEC".$cycletype"$step".ciwdump."$acct_nbr".lst test.aftr.lst
+
+        echo "************"$EXEC" CYCLING LST DUMP************" | tr -s  '[:lower:]' '[:upper:]'>>file.txt
+        echo "\n\n">>file.txt
+
+        if [ "$CHECKSQL" = "N" ] ; then
+                cat "$LOCATION"/"$EXEC".$cycletype"$step".ciwdump."$acct_nbr".lst>>file.txt
+        else
+                while read LINE
+                do
+                        acct_nbr=`echo $LINE`
+                        echo "$acct_nbr" > sqlfile.txt
+                        echo "$CIW_USER" >> sqlfile.txt
+                        $ORACLE_HOME/bin/sqlplus -S $DB_ID/$DB_PASSWD@$ORACLE_SERVICE @"$home"/"$CUSTSQL"<"$LOCATION"/sq
+lfile.txt>>file.txt
+                done<act.lst
+        fi
+
+        echo "\n\n">>file.txt
+
+        start_acct=`sort "$LOCATION"/act.lst | head -1`
+        end_acct=`sort "$LOCATION"/act.lst | tail -1`
+
+#        $CPB_BIN/ActAuth.sh PARTITION="$PART" START_ACCT="$start_acct" END_ACCT="$end_acct" OUTPUT="$EXEC".actauth RATE
+OUTPUT="$EXEC".actrate >"$EXEC".actauth.bsp.log 2>&1
+        mv /usr/cpb/"$CPB_USER"/"$EXEC".actauth /usr/cpb/"$CPB_USER"/"$EXEC".actrate "$LOCATION"
+        /usr/cpb/tools/bin/cpbs_convert -r $CIW_USER -n
+        if [ $rc -gt '0' ] ; then
+                Error_Para extc_escon_issue
+        else
+                echo "::        EXTC.ESCON GENERATED">>TestSteps.txt
+        fi
+        cp extc.escon $LOCATION/test.extc.escon
+        mv extc.escon $LOCATION/"$EXEC".$cycletype.extc.escon
+}
+
+EOD_Cycle_exec()
+{
+        cycletype="eodcycle"
+        BSPCycleScript="Cycling.sh"
+        Cycle_exec
+}
+
+BOD_Cycle_exec()
+{
+
+        cycletype="bodcycle"
+        BSPCycleScript="Cycling.sh BEGIN_DAY"
+        Cycle_exec
+
+}
+
+MIN_PAY_Cycle_exec()
+{
+        cycletype="minpay"
+        BSPCycleScript="MinPayDue.sh"
+        Cycle_exec
+}
+
+Nonmon_exec()
+{
+
+        Delete_batch_exec
+
+        /usr/cpb/$CPB_USER/bin/cpdtrn input="$LOCATION"/BATCH type=N1 UNITS=1 > create_batch_log
+        RECORD_COUNT=`cat create_batch_log | grep -ir 'Read' | cut -d 'Loaded' -f 2 | cut -d ' ' -f 2`
+        echo "Record count:" $RECORD_COUNT
+        Delete_batch_exec
+        /usr/cpb/$CPB_USER/bin/cpdtrn input="$LOCATION"/BATCH type=N1 UNITS=1 RECORDS=$RECORD_COUNT
+        rm create_batch_log
+
+        if [ $rc -gt '0' ] ; then
+                Error_Para Batch_Creation_issue
+        else
+                echo "::        NonMonetary Batch Created">>TestSteps.txt
+        fi
+ $CPB_BIN/NonMonetary.sh ACTIVITY_TYPE=N1 > "$LOCATION"/"$EXEC".nonmon"$step".bsp.log 2>&1
+        if [ $rc -gt '0' ] ; then
+                Error_Para NonMontary_Posting_Issue
+        else
+                echo "::        NON-MONETARY POSTING BSP POSTED">>TestSteps.txt
+        fi
+
+        Write_log_info "$LOCATION"/"$EXEC".nonmon"$step".bsp.log
+
+        echo "  ">>filehead.txt
+        echo "CIW DUMPS:">>filehead.txt
+
+        while read LINE
+           do
+           acct_nbr=`echo $LINE`
+           echo "$acct_nbr" > sqlfile.txt
+           echo "$CIW_USER" >> sqlfile.txt
+           Sql_exec
+           mv $LOCATION/ciwdump."$acct_nbr" "$LOCATION"/"$EXEC".nonmon"$step".ciwdump."$acct_nbr".lst
+           echo "AFTER TEST NONMON: "$LOCATION"/"$EXEC".nonmon"$step".ciwdump."$acct_nbr".lst">>filehead.txt
+        done<act.lst
+
+        echo "ACCOUNT DUMPS:">>filehead.txt
+
+        if [ $TOTAL_ACCOUNTS -gt "1" ] ; then
+                dumpaccounts -c d_cpbdev -f act.lst -o "$LOCATION"/"$EXEC".nonmon"$step".accdump.bulk.acx
+                if [ $rc -gt '0' ] ; then
+                        Error_Para Dump_Accounts_Issue
+                else
+                        echo "::        ACX ACCOUNT DUMP STORED">>TestSteps.txt
+                fi
+                echo "AFTER TEST NONMON: "$LOCATION"/"$EXEC".nonmon"$step".accdump.bulk.acx">>filehead.txt
+        else
+                dumpaccounts -c d_cpbdev -f act.lst -o "$LOCATION"/"$EXEC".nonmon"$step".accdump."$acct_nbr".acx
+                if [ $rc -gt '0' ] ; then
+                        Error_Para Dump_Accounts_Issue
+                else
+                        echo "::        ACX ACCOUNT DUMP STORED">>TestSteps.txt
+                fi
+                echo "AFTER TEST NONMON: "$LOCATION"/"$EXEC".nonmon"$step".accdump."$acct_nbr".acx">>filehead.txt
+ fi
+
+        cp "$EXEC".nonmon"$step".ciwdump."$acct_nbr".lst test.aftr.lst
+
+        echo "\n************"$EXEC" NONMON"$step" BSP LOG************\n">>file.txt
+        cat "$LOCATION"/"$EXEC".nonmon"$step".bsp.log>>file.txt
+
+
+        echo "\n************"$EXEC" NONMON LST DUMP************\n\n">>file.txt
+
+        if [ "$CHECKSQL" = "N" ] ; then
+                cat "$LOCATION"/"$EXEC".nonmon"$step".ciwdump."$acct_nbr".lst>>file.txt
+        else
+                while read LINE
+                do
+                        acct_nbr=`echo $LINE`
+                        echo "$acct_nbr" > sqlfile.txt
+                        echo "$CIW_USER" >> sqlfile.txt
+                        $ORACLE_HOME/bin/sqlplus -s $DB_ID/$DB_PASSWD@$ORACLE_SERVICE @"$home"/"$CUSTSQL"<"$LOCATION"/sq
+lfile.txt>>file.txt
+                done<act.lst
+        fi
+
+        /usr/cpb/tools/bin/cpbs_convert -r $CIW_USER -n
+        if [ $rc -gt '0' ] ; then
+                Error_Para extc_escon_issue
+        else
+                echo "::        EXTC.ESCON GENERATED">>TestSteps.txt
+        fi
+        cp extc.escon $LOCATION/test.extc.escon
+        mv extc.escon $LOCATION/"$EXEC".nonmon.extc.escon
+        if [ ! -f "$LOCATION"/prodexecuted ] ; then
+                cat "$LOCATION"/NONMON.STRUC.DATA."$BATCHINFO">>"$LOCATION"/filestruc.txt
+        fi
+}
+
+Monetary_exec()
+{
+
+        Delete_batch_exec
+
+        /usr/cpb/$CPB_USER/bin/cpdtrn input="$LOCATION"/BATCH type=M1 UNITS=1 > create_batch_log
+        RECORD_COUNT=`cat create_batch_log | grep -ir 'Read' | cut -d 'Loaded' -f 2 | cut -d ' ' -f 2`
+        echo "Record count:" $RECORD_COUNT
+        Delete_batch_exec
+        /usr/cpb/$CPB_USER/bin/cpdtrn input="$LOCATION"/BATCH type=M1 UNITS=1 RECORDS=$RECORD_COUNT
+        rm create_batch_log
+
+        if [ $rc -gt '0' ] ; then
+                Error_Para Batch_Creation_issue
+        else
+                echo "::        Monetary Batch Created">>TestSteps.txt
+        fi
+
+
+        $CPB_BIN/Monetary.sh  ACTIVITY_TYPE=M1 > "$LOCATION"/"$EXEC".mon"$step".bsp.log 2>&1
+        if [ $rc -gt '0' ] ; then
+                Error_Para Montary_Posting_Issue
+        else
+                echo "::        MONETARY POSTING BSP POSTED">>TestSteps.txt
+        fi
+
+        Write_log_info "$LOCATION"/"$EXEC".mon"$step".bsp.log
+
+
+        echo "  ">>filehead.txt
+        echo "CIW DUMPS:">>filehead.txt
+
+        while read LINE
+        do
+           acct_nbr=`echo $LINE`
+           echo "$acct_nbr" > sqlfile.txt
+           echo "$CIW_USER" >> sqlfile.txt
+           Sql_exec
+           mv $LOCATION/ciwdump."$acct_nbr" $LOCATION/"$EXEC".mon"$step".ciwdump."$acct_nbr".lst
+           echo "AFTER TEST MON: "$LOCATION"/"$EXEC".mon"$step".ciwdump."$acct_nbr".lst">>filehead.txt
+        done<act.lst
+
+        echo "ACCOUNT DUMPS:">>filehead.txt
+
+        if [ $TOTAL_ACCOUNTS -gt "1" ] ; then
+                dumpaccounts -c d_cpbdev -f act.lst -o "$LOCATION"/"$EXEC".mon"$step".accdump.bulk.acx
+
+                if [ $rc -gt '0' ] ; then
+                        Error_Para Dump_Accounts_Issue
+                else
+                        echo "::        ACX ACCOUNT DUMP STORED">>TestSteps.txt
+                fi
+                echo "AFTER TEST MON: "$LOCATION"/"$EXEC".mon"$step".accdump.bulk.acx">>filehead.txt
+        else
+                dumpaccounts -c d_cpbdev -f act.lst -o "$LOCATION"/"$EXEC".mon"$step".accdump."$acct_nbr".acx
+
+                if [ $rc -gt '0' ] ; then
+                        Error_Para Dump_Accounts_Issue
+                else
+                        echo "::        ACX ACCOUNT DUMP STORED">>TestSteps.txt
+                fi
+
+                echo "AFTER TEST MON: "$LOCATION"/"$EXEC".mon"$step".accdump."$acct_nbr".acx">>filehead.txt
+        fi
+
+        cp "$EXEC".mon"$step".ciwdump."$acct_nbr".lst "$EXEC".lst
+        echo "************"$EXEC" MON"$step" BSP LOG************">>file.txt
+        echo " ">>file.txt
+
+
+        echo "************"$EXEC" MON"$step"  BSP LOG************\n">>file.txt
+                cat "$LOCATION"/"$EXEC".mon"$step".bsp.log>>file.txt
+
+        echo " ">>file.txt
+        echo "************"$EXEC" MON LST DUMP************\n">>file.txt
+
+        if [ "$CHECKSQL" = "N" ] ; then
+                cat "$LOCATION"/"$EXEC".mon"$step".ciwdump."$acct_nbr".lst>>file.txt
+        else
+        while read LINE
+                do
+                        acct_nbr=`echo $LINE`
+                        echo "$acct_nbr" > sqlfile.txt
+                        echo "$CIW_USER" >> sqlfile.txt
+                        $ORACLE_HOME/bin/sqlplus -s $DB_ID/$DB_PASSWD@$ORACLE_SERVICE @"$home"/"$CUSTSQL"<"$LOCATION"/sq
+lfile.txt>>file.txt
+                done<"$LOCATION"/act.lst
+        fi
+        echo "\n\n">>file.txt
+        /usr/cpb/tools/bin/cpbs_convert -r $CIW_USER -n
+        if [ $rc -gt '0' ] ; then
+                Error_Para extc_escon_issue
+        else
+                echo "::        EXTC.ESCON GENERATED">>TestSteps.txt
+        fi
+        cp extc.escon $LOCATION/test.extc.escon
+        mv extc.escon $LOCATION/"$EXEC".mon.extc.escon
+        if [ ! -f "$LOCATION"/prodexecuted ] ; then
+                cat "$LOCATION"/MON.STRUC.DATA."$BATCHINFO">>"$LOCATION"/filestruc.txt
+        fi
+}
+
+Account_transfer_exec()
+{
+        Delete_batch_exec
+
+        /usr/cpb/$CPB_USER/bin/cpdtrn input="$LOCATION"/BATCH type=AT UNITS=1 > create_batch_log
+        RECORD_COUNT=`cat create_batch_log | grep -ir 'Read' | cut -d 'Loaded' -f 2 | cut -d ' ' -f 2`
+        echo "Record count:" $RECORD_COUNT
+        Delete_batch_exec
+        /usr/cpb/$CPB_USER/bin/cpdtrn input="$LOCATION"/BATCH type=AT UNITS=1 RECORDS=$RECORD_COUNT
+        rm create_batch_log
+
+        $CPB_BIN/AccountTransfer.sh UNITS=1 > "$LOCATION"/"$EXEC".AT"$step".bsp.log 2>&1
+
+        Write_log_info "$LOCATION"/"$EXEC".AT"$step".bsp$PART.log
+        echo "************"$EXEC" AT"$step" BSP LOG************">>file.txt
+        cat "$LOCATION"/"$EXEC".AT"$step".bsp.log>file.txt
+
+        echo "set heading off;\nselect account_nbr from card_account_v order by 1;\n quit">"$LOCATION"/find_query.sql
+        $ORACLE_HOME/bin/sqlplus -s $DB_ID/$DB_PASSWD@$ORACLE_SERVICE @"$LOCATION"/find_query.sql | sed '/6011/!d'>"$LOC
+ATION"/trt.lst
+
+        dumpaccounts -c d_cpbdev -f "$LOCATION"/trt.lst -o "$LOCATION"/"$EXEC".AT"$step".accdump.acx
+
+        echo "\nCIW DUMPS:">>filehead.txt
+
+        while read LINE
+           do
+           acct_nbr=`echo $LINE`
+           echo "$acct_nbr" > sqlfile.txt
+           echo "$CIW_USER" >> sqlfile.txt
+           Sql_exec
+           mv $LOCATION/ciwdump."$acct_nbr" "$LOCATION"/"$EXEC".AT"$step".trt.ciwdump."$acct_nbr".lst
+           echo "AFTER TEST AT TARGET: "$LOCATION"/"$EXEC".AT"$step".trt.ciwdump."$acct_nbr".lst">>filehead.txt
+
+           if [ "$CHECKSQL" = "N" ] ; then
+                 cat "$LOCATION"/"$EXEC".AT"$step".trt.ciwdump."$acct_nbr".lst>>file.txt
+           else
+                 $ORACLE_HOME/bin/sqlplus -s $DB_ID/$DB_PASSWD@$ORACLE_SERVICE @"$home"/"$CUSTSQL"<"$LOCATION"/sqlfile.t
+xt>>file.txt
+           fi
+
+        done<"$LOCATION"/trt.lst
+
+        cp "$LOCATION"/"$EXEC".AT"$step".trgt.ciwdump."$sql_acct_nbr".lst test.aftr.lst
+
+        /usr/cpb/tools/bin/cpbs_convert -r $CIW_USER -n
+        cp extc.escon $LOCATION/test.extc.escon
+        mv extc.escon $LOCATION/"$EXEC".AT.extc.escon
+        if [ ! -f "$LOCATION"/prodexecuted ] ; then
+                cat "$LOCATION"/AT.STRUC.DATA."$BATCHINFO">>"$LOCATION"/filestruc.txt
+        fi
+}
+
+Account_extract_exec()
+{
+        Delete_batch_exec
+
+        rm /usr/cpb/$CPB_USER/ext/minimaster/*
+        rm /usr/cpb/$CPB_USER/ext/rate_file/*
+        rm /usr/cpb/$CPB_USER/ext/business_file/*
+        rm /usr/cpb/$CPB_USER/ext/nrs_extract/*
+        rm /usr/cpb/$CPB_USER/ext/cross_reference/*
+
+        $CPB_BIN/AccountExtract.sh > "$LOCATION"/"$EXEC".AE"$step".bsp.log 2>&1
+
+        Write_log_info "$LOCATION"/"$EXEC".AE"$step".bsp$PART.log
+
+        echo "\nMoving extracts from region to work location">>filehead.txt
+
+        mv /usr/cpb/$CPB_USER/ext/minimaster/cbafmt83.u1.extract $LOCATION/test.mini.extract
+        mv /usr/cpb/$CPB_USER/ext/minimaster/cbafmt83.u1.audit $LOCATION/test.mini.audit
+
+        mv /usr/cpb/$CPB_USER/ext/rate_file/cbafmt87.u1.extract $LOCATION/test.rate.extract
+        mv /usr/cpb/$CPB_USER/ext/rate_file/cbafmt87.u1.audit $LOCATION/test.rate.audit
+
+        mv /usr/cpb/$CPB_USER/ext/business_file/cbafmt84.u1.extract $LOCATION/test.bus.extract
+        mv /usr/cpb/$CPB_USER/ext/business_file/cbafmt84.u1.audit $LOCATION/test.bus.audit
+
+        mv /usr/cpb/$CPB_USER/ext/nrs_extract/NRSEXT.U1.extract $LOCATION/test.nrs.extract
+        mv /usr/cpb/$CPB_USER/ext/nrs_extract/NRSEXT.U1.audit $LOCATION/test.nrs.audit
+
+        mv /usr/cpb/$CPB_USER/ext/cross_reference/cbafmt82.u1.extract $LOCATION/test.xref.extract
+        mv /usr/cpb/$CPB_USER/ext/cross_reference/cbafmt82.u1.audit $LOCATION/test.xref.audit
+
+
+        echo "************"$EXEC" AE"$step" BSP LOG************">>file.txt
+        cat "$LOCATION"/"$EXEC".AE"$step".bsp.log>file.txt
+
+
+}
+
+New_Account_exec()
+{
+        Delete_batch_exec
+
+        /usr/cpb/$CPB_USER/bin/cpdtrn input="$LOCATION"/BATCH type=NA UNITS=1 > create_batch_log
+        RECORD_COUNT=`cat create_batch_log | grep -ir 'Read' | cut -d 'Loaded' -f 2 | cut -d ' ' -f 2`
+        echo "Record count:" $RECORD_COUNT
+        Delete_batch_exec
+        /usr/cpb/$CPB_USER/bin/cpdtrn input="$LOCATION"/BATCH type=NA UNITS=1 RECORDS=$RECORD_COUNT
+        rm create_batch_log
+
+        if [ $rc -gt '0' ] ; then
+                Error_Para Batch_Creation_issue
+        else
+                echo "::        NewAccount Batch Created">>TestSteps.txt
+        fi
+
+        $CPB_BIN/NewAccounts.sh ACTIVITY_TYPE=NA > "$LOCATION"/"$EXEC".NA"$step".bsp.log
+        if [ $rc -gt '0' ] ; then
+                Error_Para NewAccount_Posting_Issue
+        else
+                echo "::        NEW-ACCOUNT POSTING BSP POSTED">>TestSteps.txt
+        fi
+
+        Write_log_info "$LOCATION"/"$EXEC".NA"$step".bsp.log
+
+        echo "  ">>filehead.txt
+        echo "CIW DUMPS:">>filehead.txt
+
+        while read LINE
+           do
+           acct_nbr=`echo $LINE`
+           echo "$acct_nbr" > sqlfile.txt
+           echo "$CIW_USER" >> sqlfile.txt
+           Sql_exec
+           mv $LOCATION/ciwdump."$acct_nbr" "$LOCATION"/"$EXEC".NA"$step".accdump."$acct_nbr".lst
+           echo "AFTER TEST NEW ACCTS: "$LOCATION"/"$EXEC".NA"$step".accdump."$acct_nbr".lst">>filehead.txt
+        done<new_act.lst
+
+        echo "ACCOUNT DUMPS:">>filehead.txt
+
+        if [ $TOTAL_ACCOUNTS -gt "1" ] ; then
+                dumpaccounts -c d_cpbdev -f new_act.lst -o "$LOCATION"/"$EXEC".NA"$step".accdump.bulk.acx
+                echo "AFTER TEST NEW ACCTS: "$LOCATION"/"$EXEC".NA"$step".accdump.bulk.acx">>filehead.txt
+        else
+                dumpaccounts -c d_cpbdev -f new_act.lst -o "$LOCATION"/"$EXEC".NA"$step".accdump."$acct_nbr".acx
+                echo "AFTER TEST NEW ACCTS: "$LOCATION"/"$EXEC".NA"$step".accdump."$acct_nbr".acx">>filehead.txt
+        fi
+
+        cp "$EXEC".na"$step".ciwdump."$acct_nbr".lst test.aftr.lst
+
+        echo "\n************"$EXEC" NA"$step" BSP LOG************\n">>file.txt
+        cat "$LOCATION"/"$EXEC".NA"$step".bsp.log>>file.txt
+
+
+        echo "\n************"$EXEC" NEW ACCOUNT LST DUMP************\n">>file.txt
+
+        if [ "$CHECKSQL" = "N" ] ; then
+                cat $LOCATION/"$EXEC".NA"$step".accdump."$acct_nbr".lst>>file.txt
+        else
+                while read LINE
+                do
+                        acct_nbr=`echo $LINE`
+                        echo "$acct_nbr" > sqlfile.txt
+                        echo "$CIW_USER" >> sqlfile.txt
+                        $ORACLE_HOME/bin/sqlplus -s $DB_ID/$DB_PASSWD@$ORACLE_SERVICE @"$home"/"$CUSTSQL"<"$LOCATION"/sq
+lfile.txt>>file.txt
+                done<new_act.lst
+        fi
+
+        echo "\n">>file.txt
+        /usr/cpb/tools/bin/cpbs_convert -r $CIW_USER -n
+        if [ $rc -gt '0' ] ; then
+                Error_Para extc_escon_issue
+        else
+                echo "::        EXTC.ESCON GENERATED">>TestSteps.txt
+        fi
+        cp extc.escon $LOCATION/test.extc.escon
+        mv extc.escon $LOCATION/"$EXEC".na.extc.escon
+        cat "$LOCATION"/NEWACCT.STRUC.DATA."$BATCHINFO">>"$LOCATION"/filestruc.txt
+}
+
+Authorizations_exec()
+{
+        Delete_batch_exec
+
+        /usr/cpb/$CPB_USER/bin/cpdtrn input="$LOCATION"/BATCH type=AU UNITS=1 > create_batch_log
+        RECORD_COUNT=`cat create_batch_log | grep -ir 'Read' | cut -d 'Loaded' -f 2 | cut -d ' ' -f 2`
+        echo "Record count:" $RECORD_COUNT
+        Delete_batch_exec
+        /usr/cpb/$CPB_USER/bin/cpdtrn input="$LOCATION"/BATCH type=AU UNITS=1 RECORDS=$RECORD_COUNT
+        rm create_batch_log
+
+        if [ $rc -gt '0' ] ; then
+                Error_Para Batch_Creation_issue
+        else
+                echo "::        Authorization Batch Created">>TestSteps.txt
+        fi
+
+        $CPB_BIN/Authorizations.sh > "$LOCATION"/"$EXEC".auth"$step".bsp.log 2>&1
+        if [ $rc -gt '0' ] ; then
+                Error_Para Auth_Posting_Issue
+        else
+                echo "::        AUTH POSTING BSP POSTED">>TestSteps.txt
+        fi
+
+        Write_log_info "$LOCATION"/"$EXEC".auth"$step".bsp.log
+
+        echo "  ">>filehead.txt
+        echo "CIW DUMPS:">>filehead.txt
+
+        while read LINE
+           do
+                acct_nbr=`echo $LINE`
+                echo "$acct_nbr" > sqlfile.txt
+                echo "$CIW_USER" >> sqlfile.txt
+                Sql_exec
+                mv $LOCATION/ciwdump."$acct_nbr" "$LOCATION"/"$EXEC".auth"$step".ciwdump."$acct_nbr".lst
+                echo "AFTER TEST AUTH: "$LOCATION"/"$EXEC".auth"$step".ciwdump."$acct_nbr".lst">>filehead.txt
+           done<act.lst
+
+        echo "ACCOUNT DUMPS:">>filehead.txt
+
+        if [ $TOTAL_ACCOUNTS -gt "1" ] ; then
+                dumpaccounts -c d_cpbdev -f act.lst -o "$LOCATION"/"$EXEC".auth"$step".accdump.bulk.acx
+                if [ $rc -gt '0' ] ; then
+                        Error_Para Dump_Accounts_Issue
+                else
+                        echo "::        ACX ACCOUNT DUMP STORED">>TestSteps.txt
+                fi
+                echo "AFTER TEST AUTH: "$LOCATION"/"$EXEC".auth"$step".accdump.bulk.acx">>filehead.txt
+        else
+                dumpaccounts -c d_cpbdev -f act.lst -o "$LOCATION"/"$EXEC".auth"$step".accdump."$acct_nbr".acx
+                if [ $rc -gt '0' ] ; then
+                        Error_Para Dump_Accounts_Issue
+                else
+                        echo "::        ACX ACCOUNT DUMP STORED">>TestSteps.txt
+                fi
+                echo "AFTER TEST AUTH: "$LOCATION"/"$EXEC".auth"$step".accdump."$acct_nbr".acx">>filehead.txt
+        fi
+
+        cp "$EXEC".auth"$step".ciwdump."$acct_nbr".lst test.aftr.lst
+
+        echo "\n************"$EXEC" auth"$step" BSP LOG************\n">>file.txt
+        cat "$LOCATION"/"$EXEC".auth"$step".bsp.log>>file.txt
+
+
+        echo "\n************"$EXEC" AUTH LST DUMP************\n\n">>file.txt
+
+        if [ "$CHECKSQL" = "N" ] ; then
+                cat "$LOCATION"/"$EXEC".auth"$step".ciwdump."$acct_nbr".lst>>file.txt
+        else
+                while read LINE
+                do
+                        acct_nbr=`echo $LINE`
+                        echo "$acct_nbr" > sqlfile.txt
+                        echo "$CIW_USER" >> sqlfile.txt
+                        $ORACLE_HOME/bin/sqlplus -s $DB_ID/$DB_PASSWD@$ORACLE_SERVICE @"$home"/"$CUSTSQL"<"$LOCATION"/sq
+lfile.txt>>file.txt
+                done<act.lst
+        fi
+
+        /usr/cpb/tools/bin/cpbs_convert -r $CIW_USER -n
+        if [ $rc -gt '0' ] ; then
+                Error_Para extc_escon_issue
+        else
+                echo "::        EXTC.ESCON GENERATED">>TestSteps.txt
+        fi
+        cp extc.escon $LOCATION/test.extc.escon
+        mv extc.escon $LOCATION/"$EXEC".auth.extc.escon
+        if [ ! -f "$LOCATION"/prodexecuted ] ; then
+                cat "$LOCATION"/AUTH.STRUC.DATA."$BATCHINFO">>"$LOCATION"/filestruc.txt
+        fi
+}
+Postings_Para()
+{
+        if [ "$POSTING" = "EOD_CYCLING" ] ; then
+                EOD_Cycle_exec
+        fi
+
+        if [ "$POSTING" = "BOD_CYCLING" ] ; then
+                BOD_Cycle_exec
+        fi
+
+        if [ "$POSTING" = "MIN_PAY_CYCLING" ] ; then
+                MIN_PAY_Cycle_exec
+        fi
+
+        if [ "$POSTING" = "NONMON" ] ; then
+                Nonmon_exec
+        fi
+
+        if [ "$POSTING" = "MONETARY" ] ; then
+                Monetary_exec
+        fi
+        if [ "$POSTING" = "ACCT_TRANSFER" ] ; then
+                Account_transfer_exec
+        fi
+
+        if [ "$POSTING" = "ACCT_EXTRACT" ] ; then
+                Account_extract_exec
+        fi
+
+        if [ "$POSTING" = "NEW_ACCOUNTS" ] ; then
+               New_Account_exec
+        fi
+        if [ "$POSTING" = "AUTHORIZATION" ] ; then
+               Authorizations_exec
+        fi
+}
+
+let n=1
+let o1=1
+export HOME=$LOCATION
+
+if [ ! -f "$LOCATION"/runcntl.txt ] ; then
+        echo "Runcntl Already Set"
+else
+        while read LINE
+        do
+        runset=`echo $LINE`
+        echo "$runset"
+        done<"$LOCATION"/runcntl.txt
+fi
+
+echo "value of postings-----------------------"
+#cat "$LOCATION"/a_posting.txt
+
+while IFS=: read -r POSTING Approval Runcntl BATCHINFO
+do
+        echo "entered POSTING PARA"
+        if [ "$n" = "$o1" ] ; then
+                Purge_Load_exec
+                if [ ! -f "$LOCATION"/prodexecuted -o "$POSTING" = "NEW_ACCOUNTS" ] ; then
+
+                 if [ "$POSTING" != "NEW_ACCOUNTS" ] ; then
+                  if  [ ! -f "$LOCATION"/bfr*lst ] ; then
+                        while read LINE
+                        do
+                                acct_nbr=`echo $LINE`
+                                echo "$acct_nbr" > sqlfile.txt
+                                echo "$CIW_USER" >> sqlfile.txt
+                                Sql_exec
+                                mv $LOCATION/ciwdump."$acct_nbr" $LOCATION/bfr.ciwdump."$acct_nbr".lst
+                                cp bfr.ciwdump."$acct_nbr".lst bef.lst
+                                echo "CIW DUMPS:">filehead.txt
+                                echo "BEFORE : "$LOCATION"/bfr.ciwdump."$acct_nbr".lst">>filehead.txt
+
+                                if [ "$CHECKSQL" = "N" ] ; then
+                                        cat "$LOCATION"/bfr.ciwdump."$acct_nbr".lst>>file.txt
+                                else
+                                        $ORACLE_HOME/bin/sqlplus -s $DB_ID/$DB_PASSWD@$ORACLE_SERVICE @"$home"/"$CUSTSQL
+"<"$LOCATION"/sqlfile.txt>>file.txt
+                               fi
+                        done<$LOCATION/act.lst
+
+                        echo "ACCOUNT DUMPS:">>filehead.txt
+                        echo "BEFORE : "$LOCATION"/bfr.accdump."$acct_nbr".acx">>filehead.txt
+                        echo "  ">>filehead.txt
+
+                fi
+             fi
+        fi
+        echo "runset :"$runset
+        echo "Runcntl "$Runcntl
+
+        if [ "$Approval" = "Y" ] && [ "$runset" != "$Runcntl" ] ; then
+                echo "$Runcntl">"$LOCATION"/runcntl.txt
+                /usr/cpb/tools/bin/runcntl < "$LOCATION"/runcntl.txt
+                runset="$Runcntl"
+                checkrun=`$CPB_BIN/check_cpb | grep -ir 'not' | wc -l | sed 's/ //g'`
+                if [ $checkrun -ne '0' ] ; then
+                        $CPB_BIN/kill_cpb
+                        $CPB_BIN/start_cpb
+                else
+                        $CPB_BIN/start_cpb -v
+                fi
+        else
+                echo "Runcntl for "$Runcntl" pre-set"
+        fi
+        rm test.*.extc.escon test.extc.escon
+        mv "$home"/"$BATCHINFO" "$LOCATION"
+        cp "$LOCATION"/"$BATCHINFO" "$LOCATION"/BATCH
+        step="$(echo "$LOCATION"/"$BATCHINFO"| rev | cut -c -2 | rev)"
+        EXEC=test.aftr
+        echo "::POSTING STEP $step: $POSTING">>TestSteps.txt
+        Postings_Para
+        chmod 777 *
+        n=`expr $n + 1`
+        echo "value of n: "$n
+done<"$LOCATION"/a_posting.txt
+
+
+
+
+
